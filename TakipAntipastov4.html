@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BarFlow v3.3 | Stok & POS</title>
+    
+    <!-- React & Tailwind -->
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+    <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: { extend: { colors: { slate: { 850: '#1e293b', 950: '#020617' } } } }
+        }
+    </script>
+    <style>
+        body { background-color: #020617; color: #f1f5f9; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        .loader {
+            border: 4px solid #1e293b; border-top: 4px solid #3b82f6;
+            border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const ToastContext = React.createContext();
+        const ToastProvider = ({ children }) => {
+            const [toasts, setToasts] = useState([]);
+            const addToast = (message, type = 'info') => {
+                const id = Date.now();
+                setToasts(prev => [...prev, { id, message, type }]);
+                setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+            };
+            return (
+                <ToastContext.Provider value={addToast}>
+                    {children}
+                    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+                        {toasts.map(t => (
+                            <div key={t.id} className={`pointer-events-auto px-4 py-3 rounded shadow-lg text-white font-medium flex items-center gap-2 animate-bounce ${t.type === 'success' ? 'bg-green-600' : t.type === 'error' ? 'bg-red-600' : 'bg-blue-600'}`}>
+                                <i className={`fa-solid ${t.type === 'success' ? 'fa-check-circle' : t.type === 'error' ? 'fa-triangle-exclamation' : 'fa-info-circle'}`}></i> {t.message}
+                            </div>
+                        ))}
+                    </div>
+                </ToastContext.Provider>
+            );
+        };
+        const useToast = () => React.useContext(ToastContext);
+
+        const App = () => {
+            const [activeTab, setActiveTab] = useState('inventory'); 
+            const [inventory, setInventory] = useState([]);
+            const [recipes, setRecipes] = useState([]);
+            const [sales, setSales] = useState([]);
+            const addToast = useToast();
+
+            useEffect(() => {
+                const loadData = async () => {
+                    try {
+                        const response = await fetch('./bar_data.json');
+                        if (response.ok) {
+                            const data = await response.json();
+                            setInventory(data.inventory || []);
+                            setRecipes(data.recipes || []);
+                            setSales(data.sales || []);
+                            addToast('Veriler yüklendi.', 'success');
+                        }
+                    } catch (error) {
+                        addToast('Veri dosyası (bar_data.json) bulunamadı.', 'warning');
+                    }
+                };
+                loadData();
+            }, []);
+
+            const handleExport = () => {
+                const data = { inventory, recipes, sales };
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = 'bar_data.json';
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                addToast('Veriler indirildi.', 'success');
+            };
+
+            const handleImport = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    try {
+                        const d = JSON.parse(ev.target.result);
+                        setInventory(d.inventory || []);
+                        setRecipes(d.recipes || []);
+                        setSales(d.sales || []);
+                        addToast('Veriler güncellendi.', 'success');
+                    } catch (err) { addToast('Hatalı dosya.', 'error'); }
+                };
+                reader.readAsText(file); e.target.value = null;
+            };
+
+            // --- POS LOGIC (HAVUZ SİSTEMİ) ---
+            const processSale = (cartItems) => {
+                const saleId = Date.now();
+                const saleRecord = { id: saleId, timestamp: new Date().toISOString(), items: [], totalAmount: 0 };
+                const newInventory = [...inventory];
+                let allStockAvailable = true;
+
+                // 1. Stok Kontrolü
+                cartItems.forEach(cartItem => {
+                    const recipe = recipes.find(r => r.id === cartItem.recipeId);
+                    if (!recipe) return;
+                    
+                    if(recipe.ingredients && recipe.ingredients.length > 0) {
+                        recipe.ingredients.forEach(ing => {
+                            const item = newInventory.find(i => i.id == ing.inventoryId);
+                            // Havuz kontrolü: Toplam CL yeterli mi?
+                            if (item && item.totalCl < (ing.amount * cartItem.quantity)) allStockAvailable = false;
+                        });
+                    }
+                    
+                    // Maliyet Hesabı (Satış anındaki maliyeti kaydetmek için)
+                    let itemCost = 0;
+                    if(recipe.ingredients) {
+                         recipe.ingredients.forEach(ing => {
+                            const item = inventory.find(i => i.id == ing.inventoryId);
+                            if(item) itemCost += item.costPerCl * ing.amount;
+                         });
+                    }
+
+                    saleRecord.items.push({ 
+                        recipeId: recipe.id, 
+                        recipeName: recipe.name, 
+                        quantity: cartItem.quantity, 
+                        priceAtSale: recipe.price, 
+                        costAtSale: itemCost * cartItem.quantity // Toplam maliyet (birim maliyet * adet)
+                    });
+                    saleRecord.totalAmount += recipe.price * cartItem.quantity;
+                });
+
+                if (!allStockAvailable) { addToast('Stok yetersiz! (Havuz limiti aşıldı)', 'error'); return false; }
+
+                // 2. Stok Düşümü (CL bazında)
+                cartItems.forEach(cartItem => {
+                    const recipe = recipes.find(r => r.id === cartItem.recipeId);
+                    if(recipe.ingredients && recipe.ingredients.length > 0) {
+                        recipe.ingredients.forEach(ing => {
+                            const itemIndex = newInventory.findIndex(i => i.id == ing.inventoryId);
+                            if (itemIndex > -1) {
+                                // Direkt havuzdan düşüyoruz
+                                newInventory[itemIndex].totalCl -= (ing.amount * cartItem.quantity);
+                            }
+                        });
+                    }
+                });
+
+                setInventory(newInventory);
+                setSales(prev => [...prev, saleRecord]);
+                addToast('Satış yapıldı.', 'success');
+                return true;
+            };
+
+            const deleteSale = (saleId) => {
+                if(!confirm('Bu siparişi silmek istediğinize emin misiniz?')) return;
+                const sale = sales.find(s => s.id === saleId);
+                
+                // Eğer geçmiş devir değilse stokları iade et
+                if(sale && !sale.isHistorical) {
+                    const newInv = [...inventory];
+                    sale.items.forEach(sold => {
+                        const recipe = recipes.find(r => r.id === sold.recipeId);
+                        if(recipe && recipe.ingredients) {
+                            recipe.ingredients.forEach(ing => {
+                                const idx = newInv.findIndex(i => i.id == ing.inventoryId);
+                                if(idx > -1) {
+                                    // Havuza iade et
+                                    newInv[idx].totalCl += (ing.amount * sold.quantity);
+                                }
+                            });
+                        }
+                    });
+                    setInventory(newInv);
+                    addToast('Sipariş silindi, stoklar iade edildi.', 'info');
+                } else {
+                    addToast('Geçmiş kayıt silindi (Stok etkilenmez).', 'warning');
+                }
+                setSales(prev => prev.filter(s => s.id !== saleId));
+            };
+
+            // --- STOK YÖNETİMİ (Giriş/Çıkış) ---
+            const updateStock = (itemData, type) => {
+                const existingIndex = inventory.findIndex(i => i.name.toLowerCase() === itemData.name.toLowerCase());
+                
+                if (existingIndex > -1) {
+                    // Mevcut ürün güncelleme
+                    const newInv = [...inventory];
+                    const item = newInv[existingIndex];
+                    const changeAmount = itemData.volume * itemData.quantity; // Şişe Hacmi * Adet = Toplam CL
+                    
+                    if (type === 'add') {
+                        item.totalCl += changeAmount;
+                        addToast(`+${changeAmount}cl havuza eklendi.`, 'success');
+                    } else {
+                        // Eksiye düşmesine izin verebiliriz veya engelleyebiliriz, şimdilik uyarıp düşelim
+                        if(item.totalCl < changeAmount) addToast('Dikkat: Stok eksiye düşüyor!', 'warning');
+                        item.totalCl -= changeAmount;
+                        addToast(`-${changeAmount}cl havuzdan düşüldü.`, 'warning');
+                    }
+                    setInventory(newInv);
+                } else {
+                    // Yeni ürün (Sadece ekleme modunda)
+                    if (type === 'remove') {
+                        addToast('Olmayan üründen düşüm yapılamaz.', 'error');
+                        return;
+                    }
+                    const newItem = {
+                        id: Date.now(),
+                        name: itemData.name,
+                        category: itemData.category,
+                        volume: parseInt(itemData.volume),
+                        costPerCl: parseFloat(itemData.costPerCl),
+                        totalCl: parseInt(itemData.volume) * parseInt(itemData.quantity), // İlk giriş
+                        quantity: 0 // Artık quantity takibi yapmıyoruz, her şey totalCl
+                    };
+                    setInventory(prev => [...prev, newItem]);
+                    addToast('Yeni ürün havuza eklendi.', 'success');
+                }
+            };
+
+            const saveRecipe = (newRecipe) => {
+                if(recipes.find(r => r.name === newRecipe.name)) {
+                    setRecipes(prev => prev.map(r => r.name === newRecipe.name ? {...newRecipe, id: r.id} : r));
+                } else {
+                    setRecipes(prev => [...prev, {...newRecipe, id: Date.now()}]);
+                }
+                addToast('Reçete kaydedildi.', 'success');
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
+                    <header className="bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center sticky top-0 z-40 shadow-xl">
+                        <div className="flex items-center gap-2">
+                            <div className="bg-blue-600 p-2 rounded text-white"><i className="fa-solid fa-cocktail"></i></div>
+                            <h1 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-teal-400">BarFlow v3.3</h1>
+                        </div>
+                        <nav className="flex bg-slate-800 p-1 rounded-lg">
+                            {['pos', 'inventory', 'recipes', 'reports'].map(tab => (
+                                <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-2 rounded-md font-medium transition ${activeTab === tab ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}>
+                                    {tab === 'pos' ? 'Satış' : tab === 'inventory' ? 'Stok' : tab === 'recipes' ? 'Reçete' : 'Rapor'}
+                                </button>
+                            ))}
+                        </nav>
+                        <div className="flex gap-2">
+                            <label className="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded cursor-pointer text-sm border border-slate-700"><i className="fa-solid fa-upload"></i><input type="file" accept=".json" onChange={handleImport} className="hidden" /></label>
+                            <button onClick={handleExport} className="bg-green-700 hover:bg-green-600 px-3 py-2 rounded text-sm font-bold shadow-lg border border-green-600"><i className="fa-solid fa-download"></i> Kaydet</button>
+                        </div>
+                    </header>
+                    <main className="flex-1 p-4 overflow-hidden flex flex-col">
+                        {activeTab === 'pos' && <POSView inventory={inventory} recipes={recipes} onProcessSale={processSale} />}
+                        {activeTab === 'inventory' && <InventoryView inventory={inventory} onUpdateStock={updateStock} />}
+                        {activeTab === 'recipes' && <RecipesView inventory={inventory} recipes={recipes} onSaveRecipe={saveRecipe} />}
+                        {activeTab === 'reports' && <ReportsView sales={sales} onDeleteSale={deleteSale} />}
+                    </main>
+                </div>
+            );
+        };
+
+        // --- ALT GÖRÜNÜMLER ---
+
+        const InventoryView = ({ inventory, onUpdateStock }) => {
+            const [showModal, setShowModal] = useState(false);
+            const [isNewItem, setIsNewItem] = useState(false);
+            const [transactionType, setTransactionType] = useState('add'); // 'add' or 'remove'
+            
+            const [name, setName] = useState('');
+            const [category, setCategory] = useState('Alkol');
+            const [volume, setVolume] = useState(70);
+            const [costPerCl, setCostPerCl] = useState(1.0);
+            const [quantity, setQuantity] = useState(1);
+
+            const openAddModal = () => {
+                setIsNewItem(true); setTransactionType('add'); setName(''); setCategory('Alkol'); setVolume(70); setQuantity(1); setShowModal(true);
+            };
+
+            const openStockModal = (item) => {
+                setIsNewItem(false); setTransactionType('add'); setName(item.name); setCategory(item.category); setVolume(item.volume); setCostPerCl(item.costPerCl); setQuantity(1); setShowModal(true);
+            };
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                onUpdateStock({ name, category, volume, quantity, costPerCl }, transactionType);
+                setShowModal(false);
+            };
+
+            return (
+                <div className="h-full flex flex-col max-w-6xl mx-auto w-full">
+                    <div className="flex justify-between mb-4">
+                        <h2 className="text-2xl font-bold text-white">Stok Havuzu</h2>
+                        <button onClick={openAddModal} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded flex items-center gap-2"><i className="fa-solid fa-plus"></i> Yeni Ürün Tanımla</button>
+                    </div>
+                    
+                    <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden flex-1 overflow-y-auto">
+                        <table className="w-full text-left">
+                            <thead className="bg-slate-900 text-slate-400 uppercase text-xs sticky top-0">
+                                <tr>
+                                    <th className="p-4">Ürün Adı</th>
+                                    <th className="p-4">Kategori</th>
+                                    <th className="p-4 text-right">Toplam Havuz (cl)</th>
+                                    <th className="p-4 text-right">Tahmini Şişe</th>
+                                    <th className="p-4 text-center">İşlem</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-700 text-slate-300">
+                                {inventory.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-slate-500">Stok boş. Veri yükleyin veya yeni ürün ekleyin.</td></tr>}
+                                {inventory.map(item => {
+                                    // Tahmini şişe hesabı: Toplam CL / Standart Hacim
+                                    const bottleEstimate = (item.totalCl / item.volume).toFixed(1);
+                                    let statusColor = 'text-green-400';
+                                    if(item.totalCl < item.volume) statusColor = 'text-red-500 font-bold';
+                                    else if(item.totalCl < item.volume * 2) statusColor = 'text-yellow-400';
+
+                                    return (
+                                        <tr key={item.id} className="hover:bg-slate-700/50">
+                                            <td className="p-4 font-medium text-white">{item.name}</td>
+                                            <td className="p-4"><span className="bg-slate-700 px-2 py-1 rounded text-xs">{item.category}</span></td>
+                                            <td className={`p-4 text-right font-mono text-lg ${statusColor}`}>{item.totalCl.toFixed(0)} cl</td>
+                                            <td className="p-4 text-right">
+                                                <div className="text-sm">~{bottleEstimate} Şişe</div>
+                                                <div className="text-xs text-slate-500">({item.volume}cl bazlı)</div>
+                                            </td>
+                                            <td className="p-4 text-center">
+                                                <button onClick={() => openStockModal(item)} className="bg-slate-700 text-white hover:bg-slate-600 px-3 py-1 rounded text-sm transition border border-slate-600">Yönet</button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {showModal && (
+                        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+                            <div className="bg-slate-800 p-6 rounded-xl w-full max-w-md border border-slate-600 shadow-2xl">
+                                <h3 className="text-xl font-bold text-white mb-4">{isNewItem ? 'Yeni Ürün Tanımla' : 'Stok Yönetimi: ' + name}</h3>
+                                
+                                <form onSubmit={handleSubmit} className="space-y-4">
+                                    {/* İşlem Tipi Seçici (Sadece mevcut ürünler için) */}
+                                    {!isNewItem && (
+                                        <div className="flex bg-slate-900 p-1 rounded-lg mb-4">
+                                            <button type="button" onClick={() => setTransactionType('add')} className={`flex-1 py-2 rounded-md text-sm font-bold transition ${transactionType === 'add' ? 'bg-green-600 text-white' : 'text-slate-400 hover:text-white'}`}>Giriş (Ekle)</button>
+                                            <button type="button" onClick={() => setTransactionType('remove')} className={`flex-1 py-2 rounded-md text-sm font-bold transition ${transactionType === 'remove' ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-white'}`}>Çıkış (Düş)</button>
+                                        </div>
+                                    )}
+
+                                    {isNewItem && (
+                                        <div>
+                                            <label className="block text-slate-400 text-sm mb-1">Ürün Adı</label>
+                                            <input type="text" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" value={name} onChange={e => setName(e.target.value)} required />
+                                        </div>
+                                    )}
+                                    
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-slate-400 text-sm mb-1">Hacim (cl)</label>
+                                            <input type="number" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" value={volume} onChange={e => setVolume(e.target.value)} required />
+                                            <p className="text-xs text-slate-500 mt-1">Örn: 70, 100, 35</p>
+                                        </div>
+                                        <div>
+                                            <label className="block text-slate-400 text-sm mb-1">Adet / Miktar</label>
+                                            <input type="number" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" value={quantity} onChange={e => setQuantity(e.target.value)} required />
+                                        </div>
+                                    </div>
+
+                                    {isNewItem && (
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <label className="block text-slate-400 text-sm mb-1">Kategori</label>
+                                                <select className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" value={category} onChange={e => setCategory(e.target.value)}>
+                                                    <option>Alkol</option><option>Mixer</option><option>Garnish</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-slate-400 text-sm mb-1">Maliyet (TL/cl)</label>
+                                                <input type="number" step="0.01" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" value={costPerCl} onChange={e => setCostPerCl(e.target.value)} />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className="bg-slate-700/30 p-3 rounded text-sm text-slate-300">
+                                        <div className="flex justify-between">
+                                            <span>İşlem Hacmi:</span>
+                                            <span className="font-bold">{volume * quantity} cl</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="pt-4 flex gap-2">
+                                        <button type="button" onClick={() => setShowModal(false)} className="flex-1 py-2 border border-slate-600 rounded text-slate-300 hover:bg-slate-700">İptal</button>
+                                        <button type="submit" className={`flex-1 py-2 rounded font-bold text-white ${transactionType === 'add' ? 'bg-green-600 hover:bg-green-500' : 'bg-red-600 hover:bg-red-500'}`}>
+                                            {transactionType === 'add' ? 'Onayla' : 'Düş'}
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const POSView = ({ inventory, recipes, onProcessSale }) => {
+            const [cart, setCart] = useState([]);
+            const [selectedRecipe, setSelectedRecipe] = useState(null);
+            const [qty, setQty] = useState(1);
+
+            const checkStatus = (recipe) => {
+                if (!recipe.ingredients || recipe.ingredients.length === 0) return 'NO_RECIPE';
+                for (let ing of recipe.ingredients) {
+                    const item = inventory.find(i => i.id == ing.inventoryId);
+                    if (!item || item.totalCl < ing.amount) return 'NO_STOCK';
+                }
+                return 'OK';
+            };
+
+            const addToCart = () => {
+                if (!selectedRecipe) return;
+                setCart(prev => {
+                    const ex = prev.find(i => i.recipeId === selectedRecipe.id);
+                    return ex ? prev.map(i => i.recipeId === selectedRecipe.id ? { ...i, quantity: i.quantity + qty } : i) 
+                              : [...prev, { recipeId: selectedRecipe.id, name: selectedRecipe.name, price: selectedRecipe.price, quantity: qty }];
+                });
+                setSelectedRecipe(null); setQty(1);
+            };
+
+            return (
+                <div className="flex h-full gap-4 overflow-hidden">
+                    <div className="flex-1 overflow-y-auto pr-2 grid grid-cols-2 md:grid-cols-4 gap-4 content-start">
+                        {recipes.map(r => {
+                            const status = checkStatus(r);
+                            return (
+                                <div key={r.id} onClick={() => status === 'OK' && setSelectedRecipe(r)} className={`p-4 rounded-xl border relative cursor-pointer flex flex-col ${status === 'OK' ? 'bg-slate-800 border-slate-700 hover:border-blue-500' : 'bg-slate-900 border-slate-800 opacity-50 grayscale'}`}>
+                                    <div className="flex justify-between mb-2"><span className="text-blue-300"><i className="fa-solid fa-martini-glass"></i></span><span className="font-bold text-white">{r.price} ₺</span></div>
+                                    <h3 className="font-semibold text-slate-200">{r.name}</h3>
+                                    {status !== 'OK' && <div className="absolute inset-0 bg-black/60 flex items-center justify-center rounded-xl"><span className="text-red-500 font-bold border border-red-500 px-2 text-xs bg-black">{status === 'NO_RECIPE' ? 'REÇETE YOK' : 'STOK YOK'}</span></div>}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <div className="w-80 bg-slate-800 rounded-xl border border-slate-700 flex flex-col shadow-2xl">
+                        <div className="p-3 border-b border-slate-700 font-bold text-white">Sepet</div>
+                        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                            {cart.map(i => (
+                                <div key={i.recipeId} className="flex justify-between bg-slate-700/30 p-2 rounded items-center text-sm">
+                                    <div><div className="text-white">{i.name}</div><div className="text-xs text-slate-400">{i.quantity} x {i.price}</div></div>
+                                    <div className="flex gap-2 items-center"><span className="font-bold text-white">{i.quantity * i.price}</span><button onClick={() => setCart(c => c.filter(x => x.recipeId !== i.recipeId))} className="text-red-400"><i className="fa-solid fa-trash"></i></button></div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="p-3 bg-slate-900 border-t border-slate-700">
+                            <div className="flex justify-between text-lg font-bold text-white mb-2"><span>Toplam</span><span className="text-green-400">{cart.reduce((a, b) => a + (b.price * b.quantity), 0)} ₺</span></div>
+                            <button onClick={() => { if(cart.length && onProcessSale(cart)) setCart([]); }} disabled={!cart.length} className="w-full py-3 bg-green-600 hover:bg-green-500 text-white font-bold rounded">Tamamla</button>
+                        </div>
+                    </div>
+                    {selectedRecipe && (
+                        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+                            <div className="bg-slate-800 p-6 rounded-xl w-72">
+                                <h3 className="text-lg font-bold text-white mb-4">{selectedRecipe.name}</h3>
+                                <div className="flex justify-center gap-4 mb-6 items-center">
+                                    <button onClick={() => setQty(q => Math.max(1, q-1))} className="w-10 h-10 bg-slate-700 rounded text-white">-</button>
+                                    <span className="text-2xl text-white font-bold">{qty}</span>
+                                    <button onClick={() => setQty(q => q+1)} className="w-10 h-10 bg-slate-700 rounded text-white">+</button>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button onClick={() => setSelectedRecipe(null)} className="flex-1 py-2 border border-slate-600 text-slate-300 rounded">İptal</button>
+                                    <button onClick={addToCart} className="flex-1 py-2 bg-blue-600 text-white rounded">Ekle</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const RecipesView = ({ inventory, recipes, onSaveRecipe }) => {
+            const [name, setName] = useState('');
+            const [price, setPrice] = useState('');
+            const [selectedIng, setSelectedIng] = useState('');
+            const [amount, setAmount] = useState('');
+            const [ingredients, setIngredients] = useState([]);
+
+            const addIng = () => {
+                if(!selectedIng || !amount) return;
+                const item = inventory.find(i => i.id == selectedIng);
+                setIngredients([...ingredients, { inventoryId: parseInt(selectedIng), name: item.name, amount: parseFloat(amount) }]);
+                setAmount('');
+            };
+
+            return (
+                <div className="flex gap-6 h-full">
+                    <div className="w-1/2 bg-slate-800 rounded-xl border border-slate-700 p-4 overflow-y-auto">
+                        <h2 className="font-bold text-white mb-4">Reçeteler</h2>
+                        {recipes.map(r => (
+                            <div key={r.id} className="bg-slate-900 p-3 rounded mb-2 border border-slate-700">
+                                <div className="flex justify-between"><span className="text-white font-bold">{r.name}</span><span className="text-blue-400">{r.price} ₺</span></div>
+                                <div className="text-xs text-slate-500 mt-1">{r.ingredients && r.ingredients.length} Malzeme</div>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="w-1/2 bg-slate-800 rounded-xl border border-slate-700 p-4">
+                        <h2 className="font-bold text-white mb-4">Yeni Reçete</h2>
+                        <div className="space-y-3">
+                            <input className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" placeholder="Adı" value={name} onChange={e => setName(e.target.value)} />
+                            <input className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" type="number" placeholder="Fiyat" value={price} onChange={e => setPrice(e.target.value)} />
+                            <div className="bg-slate-900 p-3 rounded border border-slate-700">
+                                <div className="flex gap-2 mb-2">
+                                    <select className="flex-1 bg-slate-800 border border-slate-600 rounded text-white p-1" value={selectedIng} onChange={e => setSelectedIng(e.target.value)}>
+                                        <option value="">Malzeme Seç</option>
+                                        {inventory.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+                                    </select>
+                                    <input className="w-20 bg-slate-800 border border-slate-600 rounded text-white p-1" type="number" placeholder="cl" value={amount} onChange={e => setAmount(e.target.value)} />
+                                    <button onClick={addIng} className="bg-blue-600 text-white px-2 rounded">+</button>
+                                </div>
+                                <div className="text-xs text-slate-400 space-y-1">
+                                    {ingredients.map((ing, i) => <div key={i}>{ing.name} x {ing.amount}cl</div>)}
+                                </div>
+                            </div>
+                            <button onClick={() => { onSaveRecipe({ name, price: parseFloat(price), ingredients }); setName(''); setPrice(''); setIngredients([]); }} className="w-full bg-green-600 text-white py-2 rounded font-bold">Kaydet</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ReportsView = ({ sales, onDeleteSale }) => {
+            const stats = useMemo(() => {
+                let r = 0, c = 0;
+                sales.forEach(s => {
+                    r += s.totalAmount;
+                    s.items.forEach(i => { c += (i.costAtSale || 0); });
+                });
+                return { r, c, p: r - c };
+            }, [sales]);
+
+            return (
+                <div className="h-full flex flex-col">
+                    <div className="grid grid-cols-3 gap-6 mb-4">
+                        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+                            <span className="text-slate-400">Toplam Ciro</span>
+                            <span className="text-3xl font-bold text-blue-400">{stats.r.toLocaleString()} ₺</span>
+                        </div>
+                        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+                            <span className="text-slate-400">Toplam Maliyet</span>
+                            <span className="text-3xl font-bold text-red-400">{stats.c.toLocaleString('tr-TR', {maximumFractionDigits: 0})} ₺</span>
+                        </div>
+                        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+                            <span className="text-slate-400">Net Kâr</span>
+                            <span className="text-3xl font-bold text-green-400">{stats.p.toLocaleString('tr-TR', {maximumFractionDigits: 0})} ₺</span>
+                        </div>
+                    </div>
+                    <div className="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-hidden overflow-y-auto">
+                        <table className="w-full text-left text-slate-300">
+                            <thead className="bg-slate-900 text-slate-400 uppercase text-xs sticky top-0"><tr><th className="p-4">Tarih</th><th className="p-4">İçerik</th><th className="p-4 text-right">Tutar</th><th className="p-4 text-center">Sil</th></tr></thead>
+                            <tbody className="divide-y divide-slate-700">
+                                {sales.slice().reverse().map(s => (
+                                    <tr key={s.id} className="hover:bg-slate-700/50">
+                                        <td className="p-4 text-xs">{s.isHistorical ? 'DEVİR' : new Date(s.timestamp).toLocaleTimeString()}</td>
+                                        <td className="p-4 text-sm max-w-md truncate">{s.items.map(i => i.recipeName).join(', ')}</td>
+                                        <td className="p-4 text-right font-bold text-green-400">{s.totalAmount} ₺</td>
+                                        <td className="p-4 text-center">
+                                            <button onClick={() => onDeleteSale(s.id)} className="text-red-400 hover:bg-red-500/10 p-2 rounded transition"><i className="fa-solid fa-trash-can"></i></button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<ToastProvider><App /></ToastProvider>);
+    </script>
+</body>
+</html>
