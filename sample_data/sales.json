@@ -1,0 +1,20 @@
+[
+  {
+    "date": "2026-05-01",
+    "sku": "BRF-001",
+    "quantity": 3,
+    "channel": "store"
+  },
+  {
+    "date": "2026-05-02",
+    "sku": "BRF-002",
+    "quantity": 120,
+    "channel": "store"
+  },
+  {
+    "date": "2026-05-03",
+    "sku": "BRF-003",
+    "quantity": 4,
+    "channel": "delivery"
+  }
+]

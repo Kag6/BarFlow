@@ -31,12 +31,18 @@ Many small businesses manage sales, stock, and daily operations manually. BarFlo
 
 ## Roadmap
 
-- Add sample dataset
+- Expand sample dataset
 - Add screenshots or demo workflow
 - Document setup and usage
 - Add exportable summary reports
 - Add validation rules for stock and sales entries
 
+## Quick Start
+
+Open `index.html` in a browser, then launch the current single-file app.
+
+Sample data is available under `sample_data/`.
+
 ## Status
 
-Early portfolio project. The next priority is improving documentation, adding sample data, and making the workflow reproducible.
+Early portfolio project with a browser entry point and sample JSON data.

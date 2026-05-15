@@ -1,0 +1,26 @@
+[
+  {
+    "sku": "BRF-001",
+    "name": "Espresso Beans 1kg",
+    "category": "Coffee",
+    "stock": 24,
+    "unit_cost": 320,
+    "unit_price": 460
+  },
+  {
+    "sku": "BRF-002",
+    "name": "Paper Cup 8oz",
+    "category": "Consumables",
+    "stock": 800,
+    "unit_cost": 0.85,
+    "unit_price": 1.5
+  },
+  {
+    "sku": "BRF-003",
+    "name": "Chocolate Syrup",
+    "category": "Syrup",
+    "stock": 18,
+    "unit_cost": 95,
+    "unit_price": 145
+  }
+]
